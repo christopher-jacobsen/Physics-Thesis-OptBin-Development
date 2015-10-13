@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		237912B01BCB15C6004C9E56 /* ReweightEFT.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 237912AE1BCB15C6004C9E56 /* ReweightEFT.cpp */; };
+		237912B51BCD7662004C9E56 /* FitEFT.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 237912B31BCD7662004C9E56 /* FitEFT.cpp */; };
 		237B13851BC67773001AD590 /* main.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 237B13841BC67773001AD590 /* main.cpp */; };
 		237B138D1BC67805001AD590 /* OptBin.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 237B138B1BC67805001AD590 /* OptBin.cpp */; };
 		237B13921BC67836001AD590 /* Gzip_Stream.C in Sources */ = {isa = PBXBuildFile; fileRef = 237B13901BC67836001AD590 /* Gzip_Stream.C */; };
@@ -30,6 +31,8 @@
 /* Begin PBXFileReference section */
 		237912AE1BCB15C6004C9E56 /* ReweightEFT.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = ReweightEFT.cpp; path = ../ReweightEFT/ReweightEFT/ReweightEFT.cpp; sourceTree = "<group>"; };
 		237912AF1BCB15C6004C9E56 /* ReweightEFT.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = ReweightEFT.h; path = ../ReweightEFT/ReweightEFT/ReweightEFT.h; sourceTree = "<group>"; };
+		237912B31BCD7662004C9E56 /* FitEFT.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; name = FitEFT.cpp; path = ../FitEFT/FitEFT/FitEFT.cpp; sourceTree = "<group>"; };
+		237912B41BCD7662004C9E56 /* FitEFT.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = FitEFT.h; path = ../FitEFT/FitEFT/FitEFT.h; sourceTree = "<group>"; };
 		237B13811BC67773001AD590 /* OptBin */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = OptBin; sourceTree = BUILT_PRODUCTS_DIR; };
 		237B13841BC67773001AD590 /* main.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = main.cpp; sourceTree = "<group>"; };
 		237B138B1BC67805001AD590 /* OptBin.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = OptBin.cpp; sourceTree = "<group>"; };
@@ -63,12 +66,22 @@
 			name = ReweightEFT;
 			sourceTree = "<group>";
 		};
+		237912B11BCD7637004C9E56 /* FitEFT */ = {
+			isa = PBXGroup;
+			children = (
+				237912B31BCD7662004C9E56 /* FitEFT.cpp */,
+				237912B41BCD7662004C9E56 /* FitEFT.h */,
+			);
+			name = FitEFT;
+			sourceTree = "<group>";
+		};
 		237B13781BC67773001AD590 = {
 			isa = PBXGroup;
 			children = (
 				237B138E1BC67812001AD590 /* SherpaWeight */,
 				237B13931BC6783D001AD590 /* ModelCompare */,
 				237912AD1BCB15A0004C9E56 /* ReweightEFT */,
+				237912B11BCD7637004C9E56 /* FitEFT */,
 				237B13831BC67773001AD590 /* OptBin */,
 				237B13821BC67773001AD590 /* Products */,
 			);
@@ -175,6 +188,7 @@
 				237B13921BC67836001AD590 /* Gzip_Stream.C in Sources */,
 				237B13991BC6785E001AD590 /* RootUtil.cpp in Sources */,
 				237B138D1BC67805001AD590 /* OptBin.cpp in Sources */,
+				237912B51BCD7662004C9E56 /* FitEFT.cpp in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

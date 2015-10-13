@@ -7,6 +7,8 @@
 //
 
 #include "OptBin.h"
+#include "ModelCompare.h"
+#include "FitEFT.h"
 
 #include <TF1.h>
 #include <TH1.h>
@@ -250,84 +252,6 @@ void OptBin( const ModelCompare::ObservableVector & observables,
             Int_t nOpt2 = OptBinPass2( *pHist, nOpt1 );
             //OptBin3( *pHist );
         }
-    }
-}
-
-////////////////////////////////////////////////////////////////////////////////
-void LoadTupleData( const ModelCompare::ObservableVector & observables, const ModelCompare::ModelFile & model,
-                   TupleVector & modelData,
-                   const char * cacheFileName )
-{
-    modelData.clear();
-
-    bool        bLoadEvents = false;
-    TupleVector loadData;
-
-    for (const ModelCompare::Observable & obs : observables)
-    {
-        // make a n-tuple
-        TNtupleD * pTuple = nullptr;
-        {
-            std::string sName  = obs.BuildHistName(  model.modelName  );
-            std::string sTitle = obs.BuildHistTitle( model.modelTitle );
-
-            pTuple = new TNtupleD( sName.c_str(), sTitle.c_str(), obs.name );
-            pTuple->SetDirectory( nullptr );  // decouple from any directory
-        }
-
-        if (LoadCacheTuple( cacheFileName, pTuple ))
-        {
-            LogMsgInfo( "Loaded %hs from cache", FMT_HS(pTuple->GetName()) );
-            loadData.push_back( nullptr );  // skip this histogram
-        }
-        else
-        {
-            loadData.push_back( pTuple );
-            bLoadEvents = true;
-        }
-
-        modelData.push_back(pTuple);
-    }
-
-    // fill the n-tuple
-
-    auto FillFunc = [&](const HepMC::GenVertex & signal)
-    {
-        size_t obsIndex = 0;
-        for (const ModelCompare::Observable & obs : observables)
-        {
-            TNtupleD * pTuple = loadData[obsIndex++];
-            if (pTuple)
-            {
-                double value(0);
-                obs.getFunction( signal, &value, 1 );
-                pTuple->Fill(&value);
-            }
-        }
-    };
-
-    if (bLoadEvents)
-    {
-        LoadEvents( model.fileName, FillFunc );
-
-        SaveTuples( cacheFileName, ToConstTupleVector(modelData) );
-    }
-
-    SaveTuples( "optbin/Cross_Unbinned.root", ToConstTupleVector(modelData) );
-}
-
-////////////////////////////////////////////////////////////////////////////////
-void LoadTupleData( const ModelCompare::ObservableVector & observables, const ModelCompare::ModelFileVector & models,
-                   std::vector<TupleVector> & allData,
-                   const char * cacheFileName )
-{
-    allData.clear();
-
-    for (const ModelCompare::ModelFile & model : models)
-    {
-        TupleVector modelData;
-        LoadTupleData( observables, model, modelData, cacheFileName );
-        allData.push_back( modelData );
     }
 }
 
@@ -627,7 +551,7 @@ void OptBinUnbinned( const ModelCompare::ObservableVector & observables,
 {
     std::vector<TupleVector> allData;   // allData[model][observable]
 
-    LoadTupleData( observables, models, allData, cacheFileName );
+    FitEFT::LoadTupleData( observables, models, allData, cacheFileName );
 
     for (const TupleVector & tuples : allData)
     {
