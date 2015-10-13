@@ -8,17 +8,9 @@
 
 #include "OptBin.h"
 
-#include <TSystem.h>
-#include <TDirectory.h>
-#include <TFile.h>
-
 #include <TF1.h>
 #include <TH1.h>
-
 #include <TNtupleD.h>
-#include <TObjArray.h>
-#include <TBranch.h>
-#include <TLeaf.h>
 
 #include <HFitInterface.h>
 #include <TFitResult.h>
@@ -259,141 +251,6 @@ void OptBin( const ModelCompare::ObservableVector & observables,
             //OptBin3( *pHist );
         }
     }
-}
-
-////////////////////////////////////////////////////////////////////////////////
-TNtupleD * LoadTuple( const char * fileName, const char * tupleName )
-{
-    if (gSystem->AccessPathName( fileName ))
-        return nullptr;
-
-    struct Cleanup
-    {
-        TDirectory * oldDir = gDirectory;
-
-        ~Cleanup()
-        {
-            if (oldDir)
-                oldDir->cd();
-        }
-
-    } cleanup;
-
-    std::unique_ptr<TFile> upFile( new TFile(fileName, "READ") );
-    if (upFile->IsZombie() || !upFile->IsOpen())    // IsZombie is true if constructor failed
-        return nullptr;
-
-    TNtupleD * pTuple = nullptr;
-    upFile->GetObject( tupleName, pTuple );
-    if (!pTuple)
-        return nullptr;
-
-    TNtupleD * pClone = (TNtupleD *)pTuple->Clone();
-    pClone->SetDirectory( nullptr );
-    pClone->Reset();
-    pClone->ResetBranchAddresses();
-
-    Long64_t nEntries = pTuple->GetEntries();
-    for (Long64_t entry = 0; entry < nEntries; ++entry)
-    {
-        pTuple->GetEntry(entry);
-        pClone->Fill( pTuple->GetArgs() );
-    }
-
-    return pClone;
-}
-
-////////////////////////////////////////////////////////////////////////////////
-bool LoadCacheTuple( const char * cacheFileName, TNtupleD * & pTuple )
-{
-    if (!cacheFileName || !cacheFileName[0] || !pTuple)
-        return false;
-
-    std::unique_ptr<TNtupleD> pTupleCache( LoadTuple( cacheFileName, pTuple->GetName() ) );
-    if (!pTupleCache)
-        return false;
-
-    // compare cached object to current object
-    {
-        if (pTupleCache->Class() != pTuple->Class())
-            return false;
-
-        if (pTupleCache->GetNvar() != pTuple->GetNvar())
-            return false;
-
-        TObjArray * pBranches      = pTuple     ->GetListOfBranches();
-        TObjArray * pBranchesCache = pTupleCache->GetListOfBranches();
-
-        if (pBranchesCache->GetEntries() != pBranches->GetEntries())
-            return false;
-
-        Int_t nBranches = pBranches->GetEntries();
-        for (Int_t branchIndex = 0; branchIndex < nBranches; ++branchIndex)
-        {
-            TBranch * pBranch      = (TBranch *)pBranches     ->At(branchIndex);
-            TBranch * pBranchCache = (TBranch *)pBranchesCache->At(branchIndex);
-
-            if (strcmp( pBranchCache->GetName(),  pBranch->GetName()  ) != 0)
-                return false;
-            if (strcmp( pBranchCache->GetTitle(), pBranch->GetTitle() ) != 0)
-                return false;
-
-            TObjArray * pLeaves      = pBranch     ->GetListOfLeaves();
-            TObjArray * pLeavesCache = pBranchCache->GetListOfLeaves();
-
-            if (pLeavesCache->GetEntries() != pLeaves->GetEntries())
-                return false;
-
-            Int_t nLeaves = pLeaves->GetEntries();
-            for (Int_t leafIndex = 0; leafIndex < nLeaves; ++leafIndex)
-            {
-                TLeaf * pLeaf      = (TLeaf *)pLeaves     ->At(leafIndex);
-                TLeaf * pLeafCache = (TLeaf *)pLeavesCache->At(leafIndex);
-
-                if (strcmp( pLeafCache->GetName(),  pLeaf->GetName()  ) != 0)
-                    return false;
-                if (strcmp( pLeafCache->GetTitle(), pLeaf->GetTitle() ) != 0)
-                    return false;
-            }
-        }
-    }
-
-    // replace current tuple object with cached one
-    delete pTuple;
-    pTuple = pTupleCache.release();
-    return true;
-}
-
-////////////////////////////////////////////////////////////////////////////////
-void SaveTuples( const char * fileName, const ConstTupleVector & tuples, const char * option = "UPDATE" )
-{
-    struct Cleanup
-    {
-        TDirectory * oldDir = gDirectory;
-
-        ~Cleanup()
-        {
-            if (oldDir)
-                oldDir->cd();
-        }
-
-    } cleanup;
-
-    TFile file( fileName, option );
-    if (file.IsZombie() || !file.IsOpen())    // IsZombie is true if constructor failed
-    {
-        LogMsgError( "Failed to create file (%hs).", FMT_HS(fileName) );
-        ThrowError( std::invalid_argument( fileName ) );
-    }
-
-    for ( const TNtupleD * pTuple : tuples )
-    {
-        TNtupleD * pClone = (TNtupleD *)pTuple->Clone();
-        pClone->SetDirectory( &file );  // owned by output file, which will call delete
-        pClone->Write( 0, TObject::kOverwrite );
-    }
-
-    file.Close();
 }
 
 ////////////////////////////////////////////////////////////////////////////////

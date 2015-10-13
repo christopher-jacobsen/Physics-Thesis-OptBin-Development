@@ -24,16 +24,6 @@ namespace OptBin
 
 ////////////////////////////////////////////////////////////////////////////////
 
-typedef std::vector<TNtupleD *>         TupleVector;
-typedef std::vector<const TNtupleD *>   ConstTupleVector;
-
-inline ConstTupleVector ToConstTupleVector( const TupleVector & v )
-{
-    return ConstTupleVector( v.cbegin(), v.cend() );
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
 void OptBin( const ModelCompare::ObservableVector & observables,
              const ModelCompare::ModelFileVector &  models,
              size_t startBins,
