@@ -23,6 +23,7 @@
 #include <Fit/LogLikelihoodFCN.h>
 #include <Math/WrappedMultiTF1.h>
 
+#include <TMinuitMinimizer.h>
 #include <TVirtualFitter.h>
 
 #include <Fit/Fitter.h>
@@ -737,24 +738,33 @@ void OptBinUnbinned3( const ModelCompare::ModelFile & model, const ModelCompare:
     const Double_t xMax   = observable.xMax;
     const Double_t xRange = xMax - xMin;
 
-    const Int_t    nBinMin     = 10;
+    const Int_t    nBinMin     = 100;
     const Int_t    nBinMax     = 10000;
-    const Int_t    nBinInit    = 100;
+    const Int_t    nBinInit    = 1000;
     const Int_t    nBinStep    = 100;
 
-    const Double_t binWidthMin  = xRange / nBinMax;
-    const Double_t binWidthMax  = xRange / nBinMin;
-    const Double_t binWidthInit = xRange / nBinInit;
-    const Double_t binWidthStep = xRange / nBinInit - xRange / (nBinInit + nBinStep);
+#define MISE_OBJECTIVE   2
+#define MISE_OBJ_NAME   "2"
 
 #define MISE_NBINS
 #define MISE_CROSS
 //#define MISE_MERGE
 
+#ifndef MISE_NBINS
+    const Double_t binWidthMin  = xRange / nBinMax;
+    const Double_t binWidthMax  = xRange / nBinMin;
+    const Double_t binWidthInit = xRange / nBinInit;
+    const Double_t binWidthStep = xRange / nBinInit - xRange / (nBinInit + nBinStep);
+#endif
+
     // clone data so non-const methods can be used
     std::unique_ptr<TNtupleD> upFitData( (TNtupleD *)data.Clone() );
 
-    auto ObjectiveFunc1 = [&](const double * par) -> double
+    ////////////////////////////
+    // OBJECTIVE 1: Use a single PDF, with all bins even except the last
+
+#if MISE_OBJECTIVE == 1
+    auto ObjectiveFunc = [&](const double * par) -> double
     {
 #ifndef MISE_NBINS
         Double_t fBinWidth = par[0];
@@ -792,8 +802,14 @@ void OptBinUnbinned3( const ModelCompare::ModelFile & model, const ModelCompare:
 
         return measure;
     };
+#endif
 
-    auto ObjectiveFunc2 = [&](const double * par) -> double
+    ////////////////////////////
+    // OBJECTIVE 2: Use two PDFs with bin numbers one apart, and
+    // interpolate between the PDFs
+
+#if MISE_OBJECTIVE == 2
+    auto ObjectiveFunc = [&](const double * par) -> double
     {
 #ifndef MISE_NBINS
         Double_t fBinWidth = par[0];
@@ -853,6 +869,7 @@ void OptBinUnbinned3( const ModelCompare::ModelFile & model, const ModelCompare:
 
         return measure;
     };
+#endif
 
     //////
 
@@ -863,9 +880,9 @@ void OptBinUnbinned3( const ModelCompare::ModelFile & model, const ModelCompare:
         std::vector<ROOT::Fit::ParameterSettings> params;
 
 #ifndef MISE_NBINS
-        ROOT::Fit::ParameterSettings par0( "BinWidth_1", binWidthInit, binWidthStep, binWidthMin, binWidthMax );
+        ROOT::Fit::ParameterSettings par0( "BinWidth_" MISE_OBJ_NAME, binWidthInit, binWidthStep, binWidthMin, binWidthMax );
 #else
-        ROOT::Fit::ParameterSettings par0( "nBins_1",    nBinInit, nBinStep, nBinMin, nBinMax );
+        ROOT::Fit::ParameterSettings par0( "nBins_" MISE_OBJ_NAME,    nBinInit, nBinStep, nBinMin, nBinMax );
 #endif
         params.push_back(par0);
 
@@ -883,7 +900,7 @@ void OptBinUnbinned3( const ModelCompare::ModelFile & model, const ModelCompare:
         fitConfig.MinimizerOptions().SetTolerance(1);
     }
 
-    bool fitOK = fitter.FitFCN( 1, ObjectiveFunc1 );
+    bool fitOK = fitter.FitFCN( 1, ObjectiveFunc );
     if (!fitOK)
         LogMsgError( "Fit failed" );
 
@@ -935,27 +952,20 @@ void OptBinUnbinned3( const ModelCompare::ModelFile & model, const ModelCompare:
             pGraph->GetXaxis()->SetTitle( parName.c_str() );
             pGraph->GetYaxis()->SetTitle( "MISE Cost"     );
 
-#ifndef MISE_NBINS
+
+            std::string graphFile( "optbin/graphs" );
+#ifdef MISE_NBINS
+            graphFile += "_nbins";
+#endif
 #ifdef MISE_CROSS
+            graphFile += "_cross";
+#endif
 #ifdef MISE_MERGE
-            SaveGraph( "optbin/graphs_cross_merge.root", *pGraph );
-#else
-            SaveGraph( "optbin/graphs_cross.root", *pGraph );
+            graphFile += "_merge";
 #endif
-#else
-            SaveGraph( "optbin/graphs.root", *pGraph );
-#endif
-#else
-#ifdef MISE_CROSS
-#ifdef MISE_MERGE
-            SaveGraph( "optbin/graphs_nbins_cross_merge.root", *pGraph );
-#else
-            SaveGraph( "optbin/graphs_nbins_cross.root", *pGraph );
-#endif
-#else
-            SaveGraph( "optbin/graphs_nbins.root", *pGraph );
-#endif
-#endif
+            graphFile += ".root";
+
+            SaveGraph( graphFile.c_str(), *pGraph );
         }
     }
 
@@ -983,15 +993,17 @@ void PrintStatistics( const ModelCompare::ModelFile & model, const ModelCompare:
         double P95;
         double P995;
 
-        double U10;     // underflow 10
-        double O10;     // overflow 10
+        double U10;     // underflow max 10
+        double U100;    // underflow max 100
+        double O100;    // overflow  max 100
+        double O10;     // overflow  max 10
 
         double n_sqrtn;
         double n_Rice;
         double h_Scott;
         double h_FD;
 
-        Statistics( const std::vector<double> & v, int event10 )
+        Statistics( const std::vector<double> & v, double eventScale )
         {
             GetStats( v, min, max, mean, stddev );
 
@@ -1005,8 +1017,14 @@ void PrintStatistics( const ModelCompare::ModelFile & model, const ModelCompare:
             P95  = GetValueAtPos( v, v.size() * 0.95 );
             P995 = GetValueAtPos( v, v.size() * 0.995 );
 
+            int event10  = int(10  * eventScale);
+            int event100 = int(100 * eventScale);
+
             U10 = GetValueAtPos( v, event10 );
-            O10  = GetValueAtPos( v, v.size() - 1 - event10 );
+            O10 = GetValueAtPos( v, v.size() - 1 - event10 );
+
+            U100 = GetValueAtPos( v, event100 );
+            O100 = GetValueAtPos( v, v.size() - 1 - event100 );
 
             double n1_3 = pow( v.size(), 1.0 / 3.0 );
 
@@ -1089,11 +1107,10 @@ void PrintStatistics( const ModelCompare::ModelFile & model, const ModelCompare:
     }
 
     const double luminosity = 10;
+    const double eventScale = model.crossSectionEvents / (model.crossSection * 1000 * luminosity);  // file events per luminosity event
 
-    int event10 = int(10 * model.crossSectionEvents / (model.crossSection * 1000 * luminosity));
-
-    Statistics statAll( dataAll, event10 );
-    Statistics statCut( dataCut, event10 );
+    Statistics statAll( dataAll, eventScale );
+    Statistics statCut( dataCut, eventScale );
 
     double rangeAll = statAll.max - statAll.min;
     double rangeCut = obs.xMax - obs.xMin;
@@ -1106,7 +1123,8 @@ void PrintStatistics( const ModelCompare::ModelFile & model, const ModelCompare:
     LogMsgInfo( "Range: %g to %g  [%g to %g]",          FMT_F(statAll.min), FMT_F(statAll.max),
                                                         FMT_F(statCut.min), FMT_F(statCut.max) );
 
-    LogMsgInfo( "U/O 10 range: %g to %g",               FMT_F(statAll.U10), FMT_F(statAll.O10) );
+    LogMsgInfo( "U/O 10  range: %g to %g",              FMT_F(statAll.U10),  FMT_F(statAll.O10)  );
+    LogMsgInfo( "U/O 100 range: %g to %g",              FMT_F(statAll.U100), FMT_F(statAll.O100) );
 
     LogMsgInfo( "99%% range: %g to %g  [%g to %g]",     FMT_F(statAll.P005), FMT_F(statAll.P995),
                                                         FMT_F(statCut.P005), FMT_F(statCut.P995) );
@@ -1143,6 +1161,10 @@ void OptBinUnbinned( const ModelCompare::ObservableVector & observables,
                      const ModelCompare::ModelFileVector &  models,
                      const char * cacheFileName )
 {
+    // disable reusing the same minuit object
+    // this fixes the observed behavior/bug where a fit affected subsequent fits
+    TMinuitMinimizer::UseStaticMinuit(false);
+
     std::vector<TupleVector> allData;   // allData[model][observable]
 
     FitEFT::LoadTupleData( observables, models, allData, cacheFileName );
@@ -1154,8 +1176,8 @@ void OptBinUnbinned( const ModelCompare::ObservableVector & observables,
         auto obsItr = observables.cbegin();
         for (const TNtupleD * pTuple : tuples)
         {
-            //OptBinUnbinned3( model, *obsItr++, *pTuple );
-            PrintStatistics( model, *obsItr++, *pTuple );
+            OptBinUnbinned3( model, *obsItr++, *pTuple );
+            //PrintStatistics( model, *obsItr++, *pTuple );
         }
     }
 }
