@@ -43,7 +43,7 @@ namespace OptBin
 {
 
 ////////////////////////////////////////////////////////////////////////////////
-void GetBinStats( const TH1D & hist, double & meanEntries, double & varEntries, double binWidth )
+static void GetBinStats( const TH1D & hist, double & meanEntries, double & varEntries, double binWidth )
 {
     meanEntries = 0;
     varEntries  = 0;
@@ -75,13 +75,151 @@ void GetBinStats( const TH1D & hist, double & meanEntries, double & varEntries, 
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-double GetErrorMeasure( double meanEntries, double varEntries, double binWidth )
+static double GetErrorMeasure( double meanEntries, double varEntries, double binWidth )
 {
     return (2 * meanEntries - varEntries) / (binWidth * binWidth);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-Int_t OptBinPass1( const TH1D & hist )
+static double GetCrossValidation( const TH1D & hist, double binWidth )
+{
+    double sum  = 0;    // sum of entries
+    double sum2 = 0;    // sum of entries^2
+
+    Int_t nBins = hist.GetSize() - 2;
+    for (Int_t bin = 1; bin <= nBins; ++bin)
+    {
+        double binEntries = hist.GetBinContent(bin);
+        sum  += binEntries;
+        sum2 += binEntries * binEntries;
+    }
+
+    double n = sum;
+    double A = 2 / (n - 1);
+    double B = (n + 1) / (n * n) / (n - 1);
+
+    double result = (A - B * sum2) / binWidth;
+
+    return result;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+static void SaveGraph( const char * fileName, const TGraph & graph )
+{
+    struct Cleanup
+    {
+        TDirectory * oldDir = gDirectory;
+
+        ~Cleanup()
+        {
+            if (oldDir)
+                oldDir->cd();
+        }
+
+    } cleanup;
+
+    TFile file( fileName, "UPDATE" );
+    if (file.IsZombie() || !file.IsOpen())    // IsZombie is true if constructor failed
+    {
+        LogMsgError( "Failed to create file (%hs).", FMT_HS(fileName) );
+        ThrowError( std::invalid_argument( fileName ) );
+    }
+
+    graph.Write( nullptr, TObject::kOverwrite );
+
+    file.Close();
+}
+
+////////////////////////////////////////////////////////////////////////////////
+static void MergeZeroBins( TH1D & hist )
+{
+    // get sorted list of emtpy bins
+
+    std::list<Int_t> emptyBins;
+
+    const Int_t nBins = hist.GetSize() - 2;
+    for (Int_t bin = 1; bin <= nBins; ++bin)
+    {
+        double binEntries = hist.GetBinContent(bin);
+        if (binEntries == 0.0)
+            emptyBins.push_back(bin);
+    }
+
+    if (emptyBins.empty())
+        return;
+
+    // construct sorted list of zero regions
+
+    typedef std::pair<Int_t,Int_t> BinPair;
+
+    std::list< BinPair > mergeBins;
+    {
+        BinPair * pCurrent = nullptr;;
+
+        for (Int_t bin : emptyBins)
+        {
+            if (pCurrent && (bin == pCurrent->second + 1))
+            {
+                // extend current region
+                pCurrent->second = bin;
+                continue;
+            }
+
+            mergeBins.push_back( { bin, bin } );
+            pCurrent = &mergeBins.back();
+        }
+    }
+
+    // extend zero regions one bin to each side, respecting [1,nBins] limit
+    // now regions will have at least on non-zero bin
+    for (BinPair & region : mergeBins)
+    {
+        region.first  = std::max( region.first  - 1, 1     );
+        region.second = std::min( region.second + 1, nBins );
+    }
+
+    // merge adjacent regions sharing the same border bin
+    if (mergeBins.size() > 1)
+    {
+        auto itr1 = mergeBins.begin();
+        auto itr2 = itr1;
+        ++itr2;
+        while (itr2 != mergeBins.end())
+        {
+            if (itr1->second == itr2->first)
+            {
+                itr1->second = itr2->second;
+                itr2 = mergeBins.erase( itr2 );
+                continue;
+            }
+
+            ++itr1;
+            ++itr2;
+        }
+    }
+
+    // now merge the designated bins
+    for (const BinPair & merge : mergeBins)
+    {
+        double sum   = 0;
+        Int_t  count = 0;
+        for (Int_t bin = merge.first; bin <= merge.second; ++bin)
+        {
+            sum += hist.GetBinContent(bin);
+            ++count;
+        }
+
+        double avg = sum / count;
+
+        for (Int_t bin = merge.first; bin <= merge.second; ++bin)
+        {
+            hist.SetBinContent( bin, avg );
+        }
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+static Int_t OptBinPass1( const TH1D & hist )
 {
     LogMsgInfo( "\nPass 1: Optimizing bin size for %hs", FMT_HS(hist.GetName()) );
     LogMsgInfo( "nBins  range  width        mean     stddev   measure");
@@ -127,7 +265,7 @@ Int_t OptBinPass1( const TH1D & hist )
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-Int_t OptBinPass2( const TH1D & hist, Int_t binPass1 )
+static Int_t OptBinPass2( const TH1D & hist, Int_t binPass1 )
 {
     LogMsgInfo( "\nPass 2: Optimizing bin size for %hs", FMT_HS(hist.GetName()) );
     LogMsgInfo( "nBins  range  width        mean     stddev   measure");
@@ -178,9 +316,8 @@ Int_t OptBinPass2( const TH1D & hist, Int_t binPass1 )
     return nOptBins;
 }
 
-
 ////////////////////////////////////////////////////////////////////////////////
-Int_t OptBin3( const TH1D & hist )
+static Int_t OptBin3( const TH1D & hist )
 {
     LogMsgInfo( "\nOptimizing bin size for %hs", FMT_HS(hist.GetName()) );
     LogMsgInfo( "nBins  range  width        mean     stddev   measure");
@@ -276,7 +413,7 @@ void OptBin( const ModelCompare::ObservableVector & observables,
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-TH1D * MakePDFHistExact( TNtupleD & data, Int_t nBins, Double_t xMin, Double_t xMax )
+static TH1D * MakePDFHistExact( TNtupleD & data, Int_t nBins, Double_t xMin, Double_t xMax )
 {
     TH1D * pHist = new TH1D( "PDF", "PDF", nBins, xMin, xMax );
     pHist->SetDirectory( nullptr );
@@ -300,7 +437,7 @@ TH1D * MakePDFHistExact( TNtupleD & data, Int_t nBins, Double_t xMin, Double_t x
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-TH1D * MakePDFHist( TNtupleD & data, Double_t binWidth, Double_t xMin, Double_t xMax )
+static TH1D * MakePDFHist( TNtupleD & data, Double_t binWidth, Double_t xMin, Double_t xMax )
 {
     // calculate bin edges
 
@@ -365,7 +502,7 @@ TH1D * MakePDFHist( TNtupleD & data, Double_t binWidth, Double_t xMin, Double_t 
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-void OptBinUnbinned1( const ModelCompare::Observable & observable, const TNtupleD & data )
+static void OptBinUnbinned1( const ModelCompare::Observable & observable, const TNtupleD & data )
 {
     LogMsgInfo( "\nOptimizing bin size for %hs", FMT_HS(data.GetName()) );
     LogMsgInfo( "nBins  range  width        mean     stddev   measure");
@@ -529,7 +666,7 @@ void OptBinUnbinned1( const ModelCompare::Observable & observable, const TNtuple
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-void OptBinUnbinned2( const ModelCompare::Observable & observable, const TNtupleD & data )
+static void OptBinUnbinned2( const ModelCompare::Observable & observable, const TNtupleD & data )
 {
     LogMsgInfo( "\nOptimizing bin size for %hs", FMT_HS(data.GetName()) );
     LogMsgInfo( "nBins  range  width        mean     stddev   measure");
@@ -589,146 +726,7 @@ void OptBinUnbinned2( const ModelCompare::Observable & observable, const TNtuple
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-static void SaveGraph( const char * fileName, const TGraph & graph )
-{
-    struct Cleanup
-    {
-        TDirectory * oldDir = gDirectory;
-
-        ~Cleanup()
-        {
-            if (oldDir)
-                oldDir->cd();
-        }
-
-    } cleanup;
-
-    TFile file( fileName, "UPDATE" );
-    if (file.IsZombie() || !file.IsOpen())    // IsZombie is true if constructor failed
-    {
-        LogMsgError( "Failed to create file (%hs).", FMT_HS(fileName) );
-        ThrowError( std::invalid_argument( fileName ) );
-    }
-
-    graph.Write( nullptr, TObject::kOverwrite );
-
-    file.Close();
-}
-
-
-////////////////////////////////////////////////////////////////////////////////
-static void MergeZeroBins( TH1D & hist )
-{
-    // get sorted list of emtpy bins
-
-    std::list<Int_t> emptyBins;
-
-    const Int_t nBins = hist.GetSize() - 2;
-    for (Int_t bin = 1; bin <= nBins; ++bin)
-    {
-        double binEntries = hist.GetBinContent(bin);
-        if (binEntries == 0.0)
-            emptyBins.push_back(bin);
-    }
-
-    if (emptyBins.empty())
-        return;
-
-    // construct sorted list of zero regions
-
-    typedef std::pair<Int_t,Int_t> BinPair;
-
-    std::list< BinPair > mergeBins;
-    {
-        BinPair * pCurrent = nullptr;;
-
-        for (Int_t bin : emptyBins)
-        {
-            if (pCurrent && (bin == pCurrent->second + 1))
-            {
-                // extend current region
-                pCurrent->second = bin;
-                continue;
-            }
-
-            mergeBins.push_back( { bin, bin } );
-            pCurrent = &mergeBins.back();
-        }
-    }
-
-    // extend zero regions one bin to each side, respecting [1,nBins] limit
-    // now regions will have at least on non-zero bin
-    for (BinPair & region : mergeBins)
-    {
-        region.first  = std::max( region.first  - 1, 1     );
-        region.second = std::min( region.second + 1, nBins );
-    }
-
-    // merge adjacent regions sharing the same border bin
-    if (mergeBins.size() > 1)
-    {
-        auto itr1 = mergeBins.begin();
-        auto itr2 = itr1;
-        ++itr2;
-        while (itr2 != mergeBins.end())
-        {
-            if (itr1->second == itr2->first)
-            {
-                itr1->second = itr2->second;
-                itr2 = mergeBins.erase( itr2 );
-                continue;
-            }
-
-            ++itr1;
-            ++itr2;
-        }
-    }
-
-    // now merge the designated bins
-    for (const BinPair & merge : mergeBins)
-    {
-        double sum   = 0;
-        Int_t  count = 0;
-        for (Int_t bin = merge.first; bin <= merge.second; ++bin)
-        {
-            sum += hist.GetBinContent(bin);
-            ++count;
-        }
-
-        double avg = sum / count;
-
-        for (Int_t bin = merge.first; bin <= merge.second; ++bin)
-        {
-            hist.SetBinContent( bin, avg );
-        }
-    }
-}
-
-////////////////////////////////////////////////////////////////////////////////
-static double GetCrossValidation( const TH1D & hist, double binWidth )
-{
-    double sum  = 0;    // sum of entries
-    double sum2 = 0;    // sum of entries^2
-
-    Int_t nBins = hist.GetSize() - 2;
-    for (Int_t bin = 1; bin <= nBins; ++bin)
-    {
-        double binEntries = hist.GetBinContent(bin);
-        sum  += binEntries;
-        sum2 += binEntries * binEntries;
-    }
-
-    double n = sum;
-    double A = 2 / (n - 1);
-    double B = (n + 1) / (n * n) / (n - 1);
-
-    double result = (A - B * sum2) / binWidth;
-
-    return result;
-}
-
-////////////////////////////////////////////////////////////////////////////////
-void OptBinUnbinned3( const ModelCompare::ModelFile & model, const ModelCompare::Observable & observable, const TNtupleD & data )
+static void OptBinUnbinned3( const ModelCompare::ModelFile & model, const ModelCompare::Observable & observable, const TNtupleD & data )
 {
     LogMsgInfo( "\nOptimizing bin size for %hs", FMT_HS(data.GetName()) );
     LogMsgInfo( "nBins  range  width        mean     stddev   measure");
