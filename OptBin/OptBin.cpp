@@ -25,6 +25,14 @@
 
 #include <TVirtualFitter.h>
 
+#include <Fit/Fitter.h>
+#include <Fit/FitConfig.h>
+#include <Fit/FitResult.h>
+
+#include <TGraph.h>
+#include <Math/Minimizer.h>
+#include <TDirectory.h>
+#include <TFile.h>
 
 using namespace RootUtil;
 
@@ -34,7 +42,7 @@ namespace OptBin
 {
 
 ////////////////////////////////////////////////////////////////////////////////
-void GetBinStats( const TH1D & hist, double & meanEntries, double & varEntries )
+void GetBinStats( const TH1D & hist, double & meanEntries, double & varEntries, double binWidth )
 {
     meanEntries = 0;
     varEntries  = 0;
@@ -42,16 +50,27 @@ void GetBinStats( const TH1D & hist, double & meanEntries, double & varEntries )
     double sum  = 0;    // sum of entries
     double sum2 = 0;    // sum of entries^2
 
+    Int_t  nCount = 0;
+
     Int_t nBins = hist.GetSize() - 2;
     for (Int_t bin = 1; bin <= nBins; ++bin)
     {
         double binEntries = hist.GetBinContent(bin);
-        sum  += binEntries;
-        sum2 += binEntries * binEntries;
+
+        if (binEntries != 0)
+        {
+            sum  += binEntries;
+            sum2 += binEntries * binEntries;
+            ++nCount;
+        }
     }
 
-    meanEntries =  sum  / nBins;
-    varEntries  = (sum2 / nBins) - (meanEntries * meanEntries);
+    double fBins = nBins;
+    if (binWidth > 0.0)
+        fBins = (hist.GetXaxis()->GetXmax() - hist.GetXaxis()->GetXmin()) / binWidth;
+
+    meanEntries =  sum  / fBins;
+    varEntries  = (sum2 / fBins) - (meanEntries * meanEntries);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -80,7 +99,7 @@ Int_t OptBinPass1( const TH1D & hist )
         double binWidth = range / nBins;
 
         double meanEntries, varEntries;
-        GetBinStats( *upRebin, meanEntries, varEntries );
+        GetBinStats( *upRebin, meanEntries, varEntries, binWidth );
 
         double measure = GetErrorMeasure( meanEntries, varEntries, binWidth );
 
@@ -136,7 +155,7 @@ Int_t OptBinPass2( const TH1D & hist, Int_t binPass1 )
         double binWidth = range / nBins;
 
         double meanEntries, varEntries;
-        GetBinStats( *upRebin, meanEntries, varEntries );
+        GetBinStats( *upRebin, meanEntries, varEntries, binWidth );
 
         double measure = GetErrorMeasure( meanEntries, varEntries, binWidth );
 
@@ -203,7 +222,7 @@ Int_t OptBin3( const TH1D & hist )
         double range = upRebin->GetXaxis()->GetXmax() - upRebin->GetXaxis()->GetXmin();
 
         double meanEntries, varEntries;
-        GetBinStats( *upRebin, meanEntries, varEntries );
+        GetBinStats( *upRebin, meanEntries, varEntries, binWidth );
 
         double measure = GetErrorMeasure( meanEntries, varEntries, binWidth );
 
@@ -253,6 +272,30 @@ void OptBin( const ModelCompare::ObservableVector & observables,
             //OptBin3( *pHist );
         }
     }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+TH1D * MakePDFHistExact( TNtupleD & data, Int_t nBins, Double_t xMin, Double_t xMax )
+{
+    TH1D * pHist = new TH1D( "PDF", "PDF", nBins, xMin, xMax );
+    pHist->SetDirectory( nullptr );
+    pHist->Sumw2(kFALSE);  // save performance, we don't need errors
+
+    // fill histogram
+
+    Long64_t nEntries = data.GetEntries();
+    for (Long64_t entry = 0; entry < nEntries; ++entry)
+    {
+        //data.LoadTree(entry);
+        data.GetEntry(entry);
+        Double_t value = *data.GetArgs();
+        pHist->Fill( value );
+    }
+
+    if (pHist->GetEntries() != (Double_t)nEntries)
+        ThrowError( "Inconsistent number of entries in histogram" );
+
+    return pHist;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -522,7 +565,7 @@ void OptBinUnbinned2( const ModelCompare::Observable & observable, const TNtuple
         double rangePDF = upPDF->GetXaxis()->GetXmax() - upPDF->GetXaxis()->GetXmin();
 
         double meanEntries, varEntries;
-        GetBinStats( *upPDF, meanEntries, varEntries );
+        GetBinStats( *upPDF, meanEntries, varEntries, binWidth );
 
         double measure = GetErrorMeasure( meanEntries, varEntries, binWidth );
 
@@ -545,6 +588,557 @@ void OptBinUnbinned2( const ModelCompare::Observable & observable, const TNtuple
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+static void SaveGraph( const char * fileName, const TGraph & graph )
+{
+    struct Cleanup
+    {
+        TDirectory * oldDir = gDirectory;
+
+        ~Cleanup()
+        {
+            if (oldDir)
+                oldDir->cd();
+        }
+
+    } cleanup;
+
+    TFile file( fileName, "UPDATE" );
+    if (file.IsZombie() || !file.IsOpen())    // IsZombie is true if constructor failed
+    {
+        LogMsgError( "Failed to create file (%hs).", FMT_HS(fileName) );
+        ThrowError( std::invalid_argument( fileName ) );
+    }
+
+    graph.Write( nullptr, TObject::kOverwrite );
+
+    file.Close();
+}
+
+
+////////////////////////////////////////////////////////////////////////////////
+static void MergeZeroBins( TH1D & hist )
+{
+    // get sorted list of emtpy bins
+
+    std::list<Int_t> emptyBins;
+
+    const Int_t nBins = hist.GetSize() - 2;
+    for (Int_t bin = 1; bin <= nBins; ++bin)
+    {
+        double binEntries = hist.GetBinContent(bin);
+        if (binEntries == 0.0)
+            emptyBins.push_back(bin);
+    }
+
+    if (emptyBins.empty())
+        return;
+
+    // construct sorted list of zero regions
+
+    typedef std::pair<Int_t,Int_t> BinPair;
+
+    std::list< BinPair > mergeBins;
+    {
+        BinPair * pCurrent = nullptr;;
+
+        for (Int_t bin : emptyBins)
+        {
+            if (pCurrent && (bin == pCurrent->second + 1))
+            {
+                // extend current region
+                pCurrent->second = bin;
+                continue;
+            }
+
+            mergeBins.push_back( { bin, bin } );
+            pCurrent = &mergeBins.back();
+        }
+    }
+
+    // extend zero regions one bin to each side, respecting [1,nBins] limit
+    // now regions will have at least on non-zero bin
+    for (BinPair & region : mergeBins)
+    {
+        region.first  = std::max( region.first  - 1, 1     );
+        region.second = std::min( region.second + 1, nBins );
+    }
+
+    // merge adjacent regions sharing the same border bin
+    if (mergeBins.size() > 1)
+    {
+        auto itr1 = mergeBins.begin();
+        auto itr2 = itr1;
+        ++itr2;
+        while (itr2 != mergeBins.end())
+        {
+            if (itr1->second == itr2->first)
+            {
+                itr1->second = itr2->second;
+                itr2 = mergeBins.erase( itr2 );
+                continue;
+            }
+
+            ++itr1;
+            ++itr2;
+        }
+    }
+
+    // now merge the designated bins
+    for (const BinPair & merge : mergeBins)
+    {
+        double sum   = 0;
+        Int_t  count = 0;
+        for (Int_t bin = merge.first; bin <= merge.second; ++bin)
+        {
+            sum += hist.GetBinContent(bin);
+            ++count;
+        }
+
+        double avg = sum / count;
+
+        for (Int_t bin = merge.first; bin <= merge.second; ++bin)
+        {
+            hist.SetBinContent( bin, avg );
+        }
+    }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+static double GetCrossValidation( const TH1D & hist, double binWidth )
+{
+    double sum  = 0;    // sum of entries
+    double sum2 = 0;    // sum of entries^2
+
+    Int_t nBins = hist.GetSize() - 2;
+    for (Int_t bin = 1; bin <= nBins; ++bin)
+    {
+        double binEntries = hist.GetBinContent(bin);
+        sum  += binEntries;
+        sum2 += binEntries * binEntries;
+    }
+
+    double n = sum;
+    double A = 2 / (n - 1);
+    double B = (n + 1) / (n * n) / (n - 1);
+
+    double result = (A - B * sum2) / binWidth;
+
+    return result;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+void OptBinUnbinned3( const ModelCompare::ModelFile & model, const ModelCompare::Observable & observable, const TNtupleD & data )
+{
+    LogMsgInfo( "\nOptimizing bin size for %hs", FMT_HS(data.GetName()) );
+    LogMsgInfo( "nBins  range  width        mean     stddev   measure");
+    LogMsgInfo( "------------------------------------------------------------");
+
+    const Double_t xMin   = observable.xMin;
+    const Double_t xMax   = observable.xMax;
+    const Double_t xRange = xMax - xMin;
+
+    const Int_t    nBinMin     = 10;
+    const Int_t    nBinMax     = 10000;
+    const Int_t    nBinInit    = 100;
+    const Int_t    nBinStep    = 100;
+
+    const Double_t binWidthMin  = xRange / nBinMax;
+    const Double_t binWidthMax  = xRange / nBinMin;
+    const Double_t binWidthInit = xRange / nBinInit;
+    const Double_t binWidthStep = xRange / nBinInit - xRange / (nBinInit + nBinStep);
+
+#define MISE_NBINS
+#define MISE_CROSS
+//#define MISE_MERGE
+
+    // clone data so non-const methods can be used
+    std::unique_ptr<TNtupleD> upFitData( (TNtupleD *)data.Clone() );
+
+    auto ObjectiveFunc1 = [&](const double * par) -> double
+    {
+#ifndef MISE_NBINS
+        Double_t fBinWidth = par[0];
+        Double_t fBins     = xRange / fBinWidth;
+#else
+        Double_t fBins     = par[0];
+        Double_t fBinWidth = xRange / fBins;
+#endif
+
+        TH1DUniquePtr upPDF( MakePDFHist( *upFitData, fBinWidth, xMin, xMax ) );
+
+#ifdef MISE_MERGE
+        MergeZeroBins( *upPDF );
+#endif
+
+        //double integral = upPDF->Integral();
+        //upPDF->Scale( 1.0, "width" );
+
+#ifndef MISE_CROSS
+        double meanEntries, varEntries;
+        GetBinStats( *upPDF, meanEntries, varEntries, fBinWidth );
+
+        double measure = GetErrorMeasure( meanEntries, varEntries, fBinWidth );
+        //double measure = 2 * meanEntries - varEntries;
+
+        LogMsgInfo( "w=%-12g n=%-8g u=%-8g v=%-8g c=%g",
+            FMT_F(fBinWidth), FMT_F(fBins),
+            FMT_F(meanEntries), FMT_F(std::sqrt(varEntries)),
+            FMT_F(measure) );
+#else
+        double measure = GetCrossValidation( *upPDF, fBinWidth );
+
+        LogMsgInfo( "w=%-12g n=%-8g m=%g", FMT_F(fBinWidth), FMT_F(fBins), FMT_F(measure) );
+#endif
+
+        return measure;
+    };
+
+    auto ObjectiveFunc2 = [&](const double * par) -> double
+    {
+#ifndef MISE_NBINS
+        Double_t fBinWidth = par[0];
+        Double_t fBins     = xRange / fBinWidth;
+#else
+        Double_t fBins     = par[0];
+        Double_t fBinWidth = xRange / fBins;
+#endif
+
+        Int_t nBinsLow  = std::ceil( fBins);    // low bin-width
+        Int_t nBinsHigh = std::floor(fBins);    // high bin-width
+
+        Double_t binWidthLow  = xRange / nBinsLow;
+        Double_t binWidthHigh = xRange / nBinsHigh;
+
+        TH1DUniquePtr upPDFLow(  MakePDFHistExact( *upFitData, nBinsLow,  xMin, xMax ) );
+        TH1DUniquePtr upPDFHigh( MakePDFHistExact( *upFitData, nBinsHigh, xMin, xMax ) );
+
+#ifdef MISE_MERGE
+        MergeZeroBins( *upPDFLow  );
+        MergeZeroBins( *upPDFHigh );
+#endif
+
+#ifndef MISE_CROSS
+        double meanEntries, varEntries;
+
+        GetBinStats( *upPDFLow, meanEntries, varEntries, 0.0 );
+        double measureLow  = GetErrorMeasure( meanEntries, varEntries, binWidthLow  );
+
+        GetBinStats( *upPDFHigh, meanEntries, varEntries, 0.0 );
+        double measureHigh = GetErrorMeasure( meanEntries, varEntries, binWidthHigh );
+#else
+        double measureLow  = GetCrossValidation( *upPDFLow,  binWidthLow  );
+        double measureHigh = GetCrossValidation( *upPDFHigh, binWidthHigh );
+#endif
+
+#ifndef MISE_NBINS
+        double measure;
+        if (nBinsLow == nBinsHigh)
+            measure = measureLow;
+        else
+        {
+            double slope = (measureHigh - measureLow) / (binWidthHigh - binWidthLow);
+            measure = (fBinWidth - binWidthLow) * slope + measureLow;
+        }
+#else
+        double fractionLow   = fBins - nBinsHigh;
+        double fractionHigh  = 1.0 - fractionLow;
+
+        double measure = fractionLow * measureLow + fractionHigh * measureHigh;
+#endif
+
+        LogMsgInfo( "w=%-12g n=%-8g mL=%-8g mH=%-8g m=%g",
+                    FMT_F(fBinWidth), FMT_F(fBins),
+                    FMT_F(measureLow), FMT_F(measureHigh),
+                    FMT_F(measure) );
+
+        return measure;
+    };
+
+    //////
+
+    ROOT::Fit::Fitter fitter;
+
+    ROOT::Fit::FitConfig & fitConfig = fitter.Config();
+    {
+        std::vector<ROOT::Fit::ParameterSettings> params;
+
+#ifndef MISE_NBINS
+        ROOT::Fit::ParameterSettings par0( "BinWidth_1", binWidthInit, binWidthStep, binWidthMin, binWidthMax );
+#else
+        ROOT::Fit::ParameterSettings par0( "nBins_1",    nBinInit, nBinStep, nBinMin, nBinMax );
+#endif
+        params.push_back(par0);
+
+        fitConfig.SetParamsSettings( params );
+
+        //fitConfig.SetMinimizer("Minuit","MigradImproved");
+
+        // run Hesse and Minos
+        fitConfig.SetParabErrors(true);
+        //fitConfig.SetMinosErrors(true);
+
+        fitConfig.MinimizerOptions().SetStrategy(2);
+        fitConfig.MinimizerOptions().SetPrintLevel(3);
+
+        fitConfig.MinimizerOptions().SetTolerance(1);
+    }
+
+    bool fitOK = fitter.FitFCN( 1, ObjectiveFunc1 );
+    if (!fitOK)
+        LogMsgError( "Fit failed" );
+
+    const ROOT::Fit::FitResult & fitResult = fitter.Result();
+
+    fitResult.Print(std::cout);
+
+    ROOT::Math::Minimizer * pMinimizer = fitter.GetMinimizer();
+
+    // create a minimization scan
+    if (pMinimizer)
+    {
+        std::unique_ptr<TGraph> upGraph( new TGraph( (Int_t)1000 ) );
+        TGraph * pGraph = upGraph.get();  // alias
+
+        std::string parName = fitResult.ParName(0);
+
+        // do +/- 2x error scan (default range)
+        double scanMin = fitResult.Parameter(0) - 2 * fitResult.ParError(0);
+        double scanMax = fitResult.Parameter(0) + 2 * fitResult.ParError(0);
+
+        // extend the range to +/- 1E-6
+        //scanMin = std::min( scanMin, -1E-6 );
+        //scanMax = std::max( scanMax,  1E-6 );
+
+        // scan symmetric around 0.0 point
+        //scanMin = std::min( scanMin, -scanMax );
+        //scanMax = std::max( scanMax, -scanMin );
+
+#ifndef MISE_NBINS
+        scanMin = binWidthMin * 10; scanMax = binWidthMax;
+#else
+        scanMin = nBinMin; scanMax = nBinMax;
+#endif
+
+        unsigned int nStep = pGraph->GetN();
+        bool scanResult = pMinimizer->Scan( 0, nStep, pGraph->GetX(), pGraph->GetY(), scanMin, scanMax );
+        if (scanResult && (nStep != 0))
+        {
+            // success
+            pGraph->Set( (Int_t)nStep );  // resize to actual steps
+
+            std::string sName  = "min_" + std::string(model.modelName)  + "_" + std::string(observable.name)  + "_"               + parName;
+            std::string sTitle =          std::string(model.modelTitle) + " " + std::string(observable.title) + ": fit min. for " + parName;
+
+            pGraph->SetName(  sName .c_str() );
+            pGraph->SetTitle( sTitle.c_str() );
+
+            pGraph->GetXaxis()->SetTitle( parName.c_str() );
+            pGraph->GetYaxis()->SetTitle( "MISE Cost"     );
+
+#ifndef MISE_NBINS
+#ifdef MISE_CROSS
+#ifdef MISE_MERGE
+            SaveGraph( "optbin/graphs_cross_merge.root", *pGraph );
+#else
+            SaveGraph( "optbin/graphs_cross.root", *pGraph );
+#endif
+#else
+            SaveGraph( "optbin/graphs.root", *pGraph );
+#endif
+#else
+#ifdef MISE_CROSS
+#ifdef MISE_MERGE
+            SaveGraph( "optbin/graphs_nbins_cross_merge.root", *pGraph );
+#else
+            SaveGraph( "optbin/graphs_nbins_cross.root", *pGraph );
+#endif
+#else
+            SaveGraph( "optbin/graphs_nbins.root", *pGraph );
+#endif
+#endif
+        }
+    }
+
+    //exit(1);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+void PrintStatistics( const ModelCompare::ModelFile & model, const ModelCompare::Observable & obs,
+                      const TNtupleD & tuple )
+{
+    struct Statistics
+    {
+        double min;
+        double max;
+        double mean;
+        double stddev;
+
+        double P005;
+        double P05;
+        double P10;
+        double P25;
+        double P50;
+        double P75;
+        double P90;
+        double P95;
+        double P995;
+
+        double U10;     // underflow 10
+        double O10;     // overflow 10
+
+        double n_sqrtn;
+        double n_Rice;
+        double h_Scott;
+        double h_FD;
+
+        Statistics( const std::vector<double> & v, int event10 )
+        {
+            GetStats( v, min, max, mean, stddev );
+
+            P005 = GetValueAtPos( v, v.size() * 0.005 );
+            P05  = GetValueAtPos( v, v.size() * 0.05 );
+            P10  = GetValueAtPos( v, v.size() * 0.10 );
+            P25  = GetValueAtPos( v, v.size() * 0.25 );
+            P50  = GetValueAtPos( v, v.size() * 0.50 );
+            P75  = GetValueAtPos( v, v.size() * 0.75 );
+            P90  = GetValueAtPos( v, v.size() * 0.90 );
+            P95  = GetValueAtPos( v, v.size() * 0.95 );
+            P995 = GetValueAtPos( v, v.size() * 0.995 );
+
+            U10 = GetValueAtPos( v, event10 );
+            O10  = GetValueAtPos( v, v.size() - 1 - event10 );
+
+            double n1_3 = pow( v.size(), 1.0 / 3.0 );
+
+            n_sqrtn = std::sqrt(v.size());
+            n_Rice  = 2.0 * n1_3;
+            h_Scott = 3.5 * stddev / n1_3;
+            h_FD    = 2.0 * (P75 - P25) / n1_3;
+        }
+
+        static double GetValueAtPos( const std::vector<double> & v, double pos )
+        {
+            int p1 = (int)std::floor(pos);
+            int p2 = (int)std::ceil(pos);
+
+            if (p1 == p2)
+                return v[p1];
+
+            double v1 = v[p1];
+            double v2 = v[p2];
+
+            double result = (pos - p1) * (v2 - v1) + v1;
+            return result;
+        }
+
+        static void GetStats( const std::vector<double> & v, double & min, double & max, double & mean, double & stddev )
+        {
+            min  = std::numeric_limits<double>::max();
+            max  = -min;
+
+            double sum  = 0;
+            double sum2 = 0;
+
+            for (double x : v)
+            {
+                sum  += x;
+                sum2 += x * x;
+                min = std::min( min, x );
+                max = std::max( max, x );
+            }
+
+            mean        = sum  / v.size();
+            double var  = sum2 / v.size() - mean * mean;
+            stddev      = std::sqrt( var );
+        }
+    };
+
+    // clone data so non-const methods can be used
+    std::unique_ptr<TNtupleD> upTuple( (TNtupleD *)tuple.Clone() );
+
+    std::vector<double> dataAll;
+    {
+        Long64_t nEntries = upTuple->GetEntries();
+
+        dataAll.reserve((size_t)nEntries);
+
+        for (Long64_t entry = 0; entry < nEntries; ++entry)
+        {
+            //upTuple->LoadTree(entry);
+            upTuple->GetEntry(entry);
+            Double_t value = *upTuple->GetArgs();
+            dataAll.push_back(value);
+        }
+    }
+
+    std::sort( dataAll.begin(), dataAll.end() );
+
+    std::vector<double> dataCut(dataAll);
+    {
+        auto itr = dataCut.begin();
+        while (itr != dataCut.end())
+        {
+            double v = *itr;
+            if ((v < obs.xMin) || !(v < obs.xMax))
+            {
+                itr = dataCut.erase(itr);
+                continue;
+            }
+            ++itr;
+        }
+    }
+
+    const double luminosity = 10;
+
+    int event10 = int(10 * model.crossSectionEvents / (model.crossSection * 1000 * luminosity));
+
+    Statistics statAll( dataAll, event10 );
+    Statistics statCut( dataCut, event10 );
+
+    double rangeAll = statAll.max - statAll.min;
+    double rangeCut = obs.xMax - obs.xMin;
+
+    LogMsgInfo( "------------------------------------------------------------");
+    LogMsgInfo( "Statistics for %hs %hs  [%g to %g]", FMT_HS(model.modelName), FMT_HS(obs.name),
+                                                      FMT_F(obs.xMin), FMT_F(obs.xMax) );
+    LogMsgInfo( "------------------------------------------------------------");
+
+    LogMsgInfo( "Range: %g to %g  [%g to %g]",          FMT_F(statAll.min), FMT_F(statAll.max),
+                                                        FMT_F(statCut.min), FMT_F(statCut.max) );
+
+    LogMsgInfo( "U/O 10 range: %g to %g",               FMT_F(statAll.U10), FMT_F(statAll.O10) );
+
+    LogMsgInfo( "99%% range: %g to %g  [%g to %g]",     FMT_F(statAll.P005), FMT_F(statAll.P995),
+                                                        FMT_F(statCut.P005), FMT_F(statCut.P995) );
+
+    LogMsgInfo( "90%% range: %g to %g  [%g to %g]",     FMT_F(statAll.P05), FMT_F(statAll.P95),
+                                                        FMT_F(statCut.P05), FMT_F(statCut.P95) );
+
+    LogMsgInfo( "Quarters: %g, %g, %g  [%g, %g, %g]",   FMT_F(statAll.P25), FMT_F(statAll.P50), FMT_F(statAll.P75),
+                                                        FMT_F(statCut.P25), FMT_F(statCut.P50), FMT_F(statCut.P75) );
+
+    LogMsgInfo( "IQR:    %g  [%g]",     FMT_F(statAll.P75 - statAll.P25),   FMT_F(statCut.P75 - statCut.P25) );
+
+    LogMsgInfo( "Mean:   %g  [%g]",     FMT_F(statAll.mean),   FMT_F(statCut.mean) );
+    LogMsgInfo( "Stddev: %g  [%g]",     FMT_F(statAll.stddev), FMT_F(statCut.stddev)  );
+
+    LogMsgInfo( "--- optimal bins ---" );
+
+    LogMsgInfo( "sqrt(n): n = %g  [%g]    w = %g  [%g]",    FMT_F(statAll.n_sqrtn),             FMT_F(statCut.n_sqrtn),
+                                                            FMT_F(rangeAll/statAll.n_sqrtn),    FMT_F(rangeCut/statCut.n_sqrtn) );
+
+    LogMsgInfo( "Rice:    n = %g  [%g]    w = %g  [%g]",    FMT_F(statAll.n_Rice),              FMT_F(statCut.n_Rice),
+                                                            FMT_F(rangeAll/statAll.n_Rice),     FMT_F(rangeCut/statCut.n_Rice) );
+
+    LogMsgInfo( "Scott:   n = %g  [%g]    w = %g  [%g]",    FMT_F(rangeAll/statAll.h_Scott),    FMT_F(rangeCut/statCut.h_Scott),
+                                                            FMT_F(statAll.h_Scott),             FMT_F(statCut.h_Scott) );
+
+    LogMsgInfo( "F-D:     n = %g  [%g]    w = %g  [%g]",    FMT_F(rangeAll/statAll.h_FD),       FMT_F(rangeCut/statCut.h_FD),
+                                                            FMT_F(statAll.h_FD),                FMT_F(statCut.h_FD) );
+
+}
+
+////////////////////////////////////////////////////////////////////////////////
 void OptBinUnbinned( const ModelCompare::ObservableVector & observables,
                      const ModelCompare::ModelFileVector &  models,
                      const char * cacheFileName )
@@ -553,12 +1147,15 @@ void OptBinUnbinned( const ModelCompare::ObservableVector & observables,
 
     FitEFT::LoadTupleData( observables, models, allData, cacheFileName );
 
+    auto modelItr = models.cbegin();
     for (const TupleVector & tuples : allData)
     {
+        auto model  = *modelItr++;
         auto obsItr = observables.cbegin();
         for (const TNtupleD * pTuple : tuples)
         {
-            OptBinUnbinned2( *obsItr++, *pTuple );
+            //OptBinUnbinned3( model, *obsItr++, *pTuple );
+            PrintStatistics( model, *obsItr++, *pTuple );
         }
     }
 }
