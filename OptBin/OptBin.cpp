@@ -487,7 +487,7 @@ static TH1D * MakePDFHist( TNtupleD & data, Double_t binWidth, Double_t xMin, Do
     //LogMsgHistEffectiveEntries(*pHist);
     //LogMsgHistUnderOverflow(*pHist);
 
-    double integral = pHist->Integral();
+    //double integral = pHist->Integral();
 
     //pHist->Scale( 1.0 / integral );
     //pHist->Scale( 1.0 / integral, "width" );
@@ -669,7 +669,6 @@ static void OptBinUnbinned1( const ModelCompare::Observable & observable, const 
 static void OptBinUnbinned2( const ModelCompare::Observable & observable, const TNtupleD & data )
 {
     LogMsgInfo( "\nOptimizing bin size for %hs", FMT_HS(data.GetName()) );
-    LogMsgInfo( "nBins  range  width        mean     stddev   measure");
     LogMsgInfo( "------------------------------------------------------------");
 
     const Double_t xMin   = observable.xMin;
@@ -679,15 +678,17 @@ static void OptBinUnbinned2( const ModelCompare::Observable & observable, const 
     // clone data so non-const methods can be used
     std::unique_ptr<TNtupleD> upFitData( (TNtupleD *)data.Clone() );
 
-    ConstTH1DUniquePtr upPDF;
+    TH1DUniquePtr upPDF;
 
-    Int_t  nOptBins    = 0;
-    double optWidth    = 0;
-    double bestMeasure = std::numeric_limits<double>::max();
+    Int_t  nOptBins1    = 0;
+    Int_t  nOptBins2    = 0;
+    double bestMeasure1 = std::numeric_limits<double>::max();
+    double bestMeasure2 = std::numeric_limits<double>::max();
 
-    Int_t nBinInc = 1;
-    Int_t nBinAdj = 10;
-    for (Int_t nBins = 1; nBins <= 10000; nBins += nBinInc)
+    Int_t nBinInc = 5;
+    Int_t nBinAdj = 100;
+
+    for (Int_t nBins = 10; nBins <= 1000000; nBins += nBinInc)
     {
         if (nBins % nBinAdj == 0)
         {
@@ -698,29 +699,36 @@ static void OptBinUnbinned2( const ModelCompare::Observable & observable, const 
 
         double binWidth = xRange / nBins;
 
-        upPDF.reset( MakePDFHist( *upFitData, binWidth, xMin, xMax ) );
+        upPDF.reset( MakePDFHistExact( *upFitData, nBins, xMin, xMax ) );
 
-        double rangePDF = upPDF->GetXaxis()->GetXmax() - upPDF->GetXaxis()->GetXmin();
+        //MergeZeroBins( *upPDF );
 
         double meanEntries, varEntries;
-        GetBinStats( *upPDF, meanEntries, varEntries, binWidth );
+        GetBinStats( *upPDF, meanEntries, varEntries, 0.0 );
 
-        double measure = GetErrorMeasure( meanEntries, varEntries, binWidth );
+        double measure1 = GetErrorMeasure( meanEntries, varEntries, binWidth );
+        double measure2 = GetCrossValidation( *upPDF, binWidth );
 
-        LogMsgInfo( "%-6i %-6g %-12g %-8g %-8g %g",
-            FMT_I(nBins), FMT_F(rangePDF), FMT_F(binWidth),
-            FMT_F(meanEntries), FMT_F(std::sqrt(varEntries)),
-            FMT_F(measure) );
-
-        if (measure < bestMeasure)
+        if (measure1 < bestMeasure1)
         {
-            bestMeasure = measure;
-            nOptBins    = nBins;
-            optWidth    = binWidth;
+            bestMeasure1 = measure1;
+            nOptBins1    = nBins;
         }
+
+        if (measure2 < bestMeasure2)
+        {
+            bestMeasure2 = measure2;
+            nOptBins2    = nBins;
+        }
+
+        LogMsgInfo( "n=%-6i  w=%-12g  m1=%-16g  m2=%-16g",
+                    FMT_I(nBins), FMT_F(binWidth),
+                    FMT_F(measure1), FMT_F(measure2) );
     }
 
-    LogMsgInfo( "Optimal bins=%i width=%g\n", FMT_I(nOptBins), FMT_F(optWidth) );
+    LogMsgInfo( "\nOptimal bins for %hs:", FMT_HS(data.GetName()) );
+    LogMsgInfo( "MISE:  n=%-6i  w=%-12g  m1=%-16g", FMT_I(nOptBins1), FMT_F(xRange / nOptBins1), FMT_F(bestMeasure1) );
+    LogMsgInfo( "Cross: n=%-6i  w=%-12g  m2=%-16g", FMT_I(nOptBins2), FMT_F(xRange / nOptBins2), FMT_F(bestMeasure2) );
 
     //exit(1);
 }
@@ -729,7 +737,6 @@ static void OptBinUnbinned2( const ModelCompare::Observable & observable, const 
 static void OptBinUnbinned3( const ModelCompare::ModelFile & model, const ModelCompare::Observable & observable, const TNtupleD & data )
 {
     LogMsgInfo( "\nOptimizing bin size for %hs", FMT_HS(data.GetName()) );
-    LogMsgInfo( "nBins  range  width        mean     stddev   measure");
     LogMsgInfo( "------------------------------------------------------------");
 
     const Double_t xMin   = observable.xMin;
@@ -1174,7 +1181,8 @@ void OptBinUnbinned( const ModelCompare::ObservableVector & observables,
         auto obsItr = observables.cbegin();
         for (const TNtupleD * pTuple : tuples)
         {
-            OptBinUnbinned3( model, *obsItr++, *pTuple );
+            OptBinUnbinned2( *obsItr++, *pTuple );
+            //OptBinUnbinned3( model, *obsItr++, *pTuple );
             //PrintStatistics( model, *obsItr++, *pTuple );
         }
     }
